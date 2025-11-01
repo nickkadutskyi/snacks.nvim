@@ -33,6 +33,7 @@ M.meta = {
 ---@field hidden? string[] list of windows that will be excluded from the layout (but can be toggled)
 ---@field on_update? fun(layout: snacks.layout)
 ---@field on_update_pre? fun(layout: snacks.layout)
+---@field on_close? fun(layout: snacks.layout)
 local defaults = {
   layout = {
     width = 0.6,
@@ -51,11 +52,8 @@ function M.new(opts)
 
   local zindex = self.opts.layout.zindex or 50
   for _, win in ipairs(vim.api.nvim_list_wins()) do
-    if vim.w[win].snacks_layout then
-      local winc = vim.api.nvim_win_get_config(win)
-      if winc.zindex and winc.zindex >= zindex then
-        zindex = winc.zindex + 1
-      end
+    if vim.w[win].snacks_win or vim.w[win].snacks_layout then
+      zindex = math.max(zindex, (vim.api.nvim_win_get_config(win).zindex or 0) + 1)
     end
   end
   self.opts.layout.zindex = zindex + 2
@@ -250,11 +248,16 @@ function M:update()
     bottom = (vim.o.cmdheight + (vim.o.laststatus == 3 and 1 or 0)) or 0
     top = (vim.o.showtabline == 2 or (vim.o.showtabline == 1 and #vim.api.nvim_list_tabpages() > 1)) and 1 or 0
   end
+
+  local parent_width = layout.relative == "win" and vim.api.nvim_win_get_width(self.root.opts.win or 0) or vim.o.columns
+  local parent_height = layout.relative == "win" and vim.api.nvim_win_get_height(self.root.opts.win or 0)
+    or vim.o.lines - top - bottom
+
   self:update_box(layout, {
     col = 0,
     row = self.opts.fullscreen and self.split and top or 0, -- only needed for fullscreen splits
-    width = vim.o.columns,
-    height = vim.o.lines - top - bottom,
+    width = parent_width,
+    height = parent_height,
   })
 
   -- fix fullscreen float layouts
@@ -324,8 +327,14 @@ function M:update_box(box, parent)
   end
   local free = vim.deepcopy(dim)
 
+  local box_win = self.box_wins[box.id]
+
   local function size(child)
-    return child[size_main] or 0
+    local ret = child[size_main] or 0
+    if type(ret) == "function" then
+      ret = ret(box_win)
+    end
+    return ret
   end
 
   local dims = {} ---@type table<number, snacks.win.Dim>
@@ -345,7 +354,8 @@ function M:update_box(box, parent)
   local free_main = free[size_main]
   for c, child in ipairs(box) do
     if not dims[c] then
-      free[size_main] = math.floor(free_main / flex)
+      -- alocate at least 1 cell
+      free[size_main] = math.max(math.floor(free_main / flex), 1)
       flex = flex - 1
       free_main = free_main - free[size_main]
       dims[c] = self:resolve(child, free)
@@ -363,8 +373,13 @@ function M:update_box(box, parent)
     offset = offset + dims[c][size_main]
   end
 
+  -- if we still have free space, shrink the root box
+  -- if we have negative space, enlarge the root box
+  if free_main ~= 0 and is_root then
+    orig_dim[size_main] = orig_dim[size_main] - free_main
+  end
+
   -- update box win
-  local box_win = self.box_wins[box.id]
   if box_win then
     if not is_root then
       box_win.opts.win = self.root.win
@@ -506,6 +521,9 @@ function M:close(opts)
     win:destroy()
   end
   vim.schedule(function()
+    if self.opts.on_close then
+      self.opts.on_close(self)
+    end
     self.opts = nil
     self.root = nil
     self.wins = nil

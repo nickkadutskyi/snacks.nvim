@@ -53,6 +53,7 @@ function M.jump(picker, _, action)
   local win = vim.api.nvim_get_current_win()
 
   local current_buf = vim.api.nvim_get_current_buf()
+  local current_tab = vim.api.nvim_get_current_tabpage()
   local current_empty = vim.bo[current_buf].buftype == ""
     and vim.bo[current_buf].filetype == ""
     and vim.api.nvim_buf_line_count(current_buf) == 1
@@ -76,47 +77,53 @@ function M.jump(picker, _, action)
     end
   end
 
-  local cmd = edit_cmd[action.cmd] or "buffer"
+  local cmd = edit_cmd[action.cmd] or edit_cmd.edit
+  local is_drop = cmd:find("drop") ~= nil
 
-  if cmd:find("drop") then
-    local drop = {} ---@type string[]
-    for _, item in ipairs(items) do
-      local path = item.buf and vim.api.nvim_buf_get_name(item.buf) or Snacks.picker.util.path(item)
-      if not path then
-        Snacks.notify.error("Either item.buf or item.file is required", { title = "Snacks Picker" })
-        return
-      end
-      drop[#drop + 1] = vim.fn.fnameescape(path)
+  -- load the buffers
+  local first_buf ---@type number
+  for _, item in ipairs(items) do
+    local buf = item.buf ---@type number
+    if not buf then
+      local path = assert(Snacks.picker.util.path(item), "Either item.buf or item.file is required")
+      buf = vim.fn.bufadd(path)
     end
-    vim.cmd(cmd .. " " .. table.concat(drop, " "))
-  else
-    for i, item in ipairs(items) do
-      -- load the buffer
-      local buf = item.buf ---@type number
-      if not buf then
-        local path = assert(Snacks.picker.util.path(item), "Either item.buf or item.file is required")
-        buf = vim.fn.bufadd(path)
-      end
-      vim.bo[buf].buflisted = true
+    vim.bo[buf].buflisted = true
+    first_buf = first_buf or buf
+  end
 
-      -- use an existing window if possible
-      if cmd == "buffer" and #items == 1 and picker.opts.jump.reuse_win and buf ~= current_buf then
-        for _, w in ipairs(vim.fn.win_findbuf(buf)) do
-          if vim.api.nvim_win_get_config(w).relative == "" then
-            win = w
-            vim.api.nvim_set_current_win(win)
-            break
-          end
-        end
-      end
-
-      -- open the first buffer
-      if i == 1 then
-        vim.cmd(("%s %d"):format(cmd, buf))
-        win = vim.api.nvim_get_current_win()
+  -- find an existing window showing the first buffer in the current tab
+  ---@param in_tab? boolean
+  local function find_win(in_tab)
+    if first_buf == current_buf then
+      return true
+    end
+    for _, w in ipairs(vim.fn.win_findbuf(first_buf)) do
+      if
+        vim.api.nvim_win_get_config(w).relative == ""
+        and (in_tab ~= true or vim.api.nvim_win_get_tabpage(w) == current_tab)
+      then
+        win = w
+        vim.api.nvim_set_current_win(win)
+        return true
       end
     end
   end
+
+  -- use an existing window if reuse_win or drop
+  if is_drop then
+    if find_win() or cmd == "drop" then
+      cmd = "buffer"
+    else
+      cmd = "tab sbuffer"
+    end
+  elseif cmd == "buffer" and #items == 1 and picker.opts.jump.reuse_win then
+    find_win(true)
+  end
+
+  -- open the first buffer
+  vim.cmd(("%s %d"):format(cmd, first_buf))
+  win = vim.api.nvim_get_current_win()
 
   -- set the cursor
   local item = items[1]
@@ -153,10 +160,22 @@ function M.close(picker)
   end)
 end
 
+function M.print_cwd(picker)
+  print(vim.fn.fnamemodify(picker:cwd(), ":p:~"))
+end
+
+function M.print_dir(picker)
+  print(vim.fn.fnamemodify(picker:dir(), ":p:~"))
+end
+
+function M.print_path(picker, item)
+  local path = item and Snacks.picker.util.path(item) or picker:dir()
+  print(vim.fn.fnamemodify(path, ":p:~"))
+end
+
 function M.cancel(picker)
   picker:norm(function()
-    local main = require("snacks.picker.core.main").new({ float = false, file = false })
-    vim.api.nvim_set_current_win(main:get())
+    picker.main = picker:filter().current_win
     picker:close()
   end)
 end
@@ -268,6 +287,9 @@ function M.picker(picker, item, action)
   end
   Snacks.picker(source, {
     cwd = Snacks.picker.util.dir(item),
+    filter = {
+      cwd = source == "recent" and Snacks.picker.util.dir(item) or nil,
+    },
     on_show = function()
       picker:close()
     end,
@@ -312,25 +334,70 @@ function M.bufdelete(picker)
   if non_buf_delete_requested then
     Snacks.notify.warn("Only open buffers can be deleted", { title = "Snacks Picker" })
   end
-  picker.list:set_selected()
-  picker.list:set_target()
-  picker:find()
+  picker:refresh()
 end
 
 function M.git_stage(picker)
   local items = picker:selected({ fallback = true })
   local done = 0
   for _, item in ipairs(items) do
+    local opts = { cwd = item.cwd } ---@type snacks.picker.util.cmd.Opts
+
     local cmd = item.status:sub(2) == " " and { "git", "restore", "--staged", item.file } or { "git", "add", item.file }
-    Snacks.picker.util.cmd(cmd, function(data, code)
+    if item.diff then
+      opts.input = item.diff
+      cmd = { "git", "apply", "--cached", item.staged and "--reverse" or nil }
+    end
+    Snacks.picker.util.cmd(cmd, function()
       done = done + 1
       if done == #items then
-        picker.list:set_selected()
-        picker.list:set_target()
-        picker:find()
+        picker:refresh()
       end
-    end, { cwd = item.cwd })
+    end, opts)
   end
+end
+
+function M.git_restore(picker)
+  local items = picker:selected({ fallback = true })
+  if #items == 0 then
+    return
+  end
+
+  -- Confirm before discarding changes
+  ---@param item snacks.picker.Item
+  local files = vim.tbl_map(function(item)
+    return Snacks.picker.util.path(item)
+  end, items)
+  local msg = #items == 1 and ("Discard changes to `%s`?"):format(files[1])
+    or ("Discard changes to %d files?"):format(#items)
+
+  Snacks.picker.util.confirm(msg, function()
+    local done = 0
+    for _, item in ipairs(items) do
+      local cmd = { "git", "restore", item.file }
+      local opts = { cwd = item.cwd }
+
+      if item.diff then
+        opts.input = item.diff
+        if item.staged then
+          cmd = { "git", "apply", "--reverse", "--cached" }
+        else
+          cmd = { "git", "apply", "--reverse" }
+        end
+      end
+
+      Snacks.picker.util.cmd(cmd, function()
+        done = done + 1
+        if done == #items then
+          vim.schedule(function()
+            picker:refresh()
+            vim.cmd.startinsert()
+            vim.cmd.checktime()
+          end)
+        end
+      end, opts)
+    end
+  end)
 end
 
 function M.git_stash_apply(_, item)
@@ -402,17 +469,13 @@ function M.git_branch_del(picker, item)
       return
     end
 
-    Snacks.picker.select({ "Yes", "No" }, { prompt = ("Delete branch %q?"):format(branch) }, function(_, idx)
-      if idx == 1 then
-        -- Proceed with deletion
-        Snacks.picker.util.cmd({ "git", "branch", "-d", branch }, function()
-          Snacks.notify("Deleted Branch `" .. branch .. "`", { title = "Snacks Picker" })
-          vim.cmd.checktime()
-          picker.list:set_selected()
-          picker.list:set_target()
-          picker:find()
-        end, { cwd = picker:cwd() })
-      end
+    Snacks.picker.util.confirm(("Delete branch %q?"):format(branch), function()
+      -- Proceed with deletion
+      Snacks.picker.util.cmd({ "git", "branch", "-D", branch }, function(_, code)
+        Snacks.notify("Deleted Branch `" .. branch .. "`", { title = "Snacks Picker" })
+        vim.cmd.checktime()
+        picker:refresh()
+      end, { cwd = picker:cwd() })
     end)
   end, { cwd = picker:cwd() })
 end
@@ -431,6 +494,7 @@ local function setqflist(items, opts)
       end_col = item.end_pos and item.end_pos[2] + 1 or nil,
       text = item.line or item.comment or item.label or item.name or item.detail or item.text,
       pattern = item.search,
+      type = ({ "E", "W", "I", "N" })[item.severity],
       valid = true,
     }
   end
@@ -480,14 +544,15 @@ function M.yank(picker, item, action)
 end
 M.copy = M.yank
 
-function M.put(picker, item, action)
+function M.paste(picker, item, action)
   ---@cast action snacks.picker.yank.Action
   picker:close()
   if item then
     local value = item[action.field] or item.data or item.text
-    vim.api.nvim_put({ value }, "", true, true)
+    vim.api.nvim_paste(value, true, -1)
   end
 end
+M.put = M.paste
 
 function M.history_back(picker)
   picker:hist()

@@ -30,6 +30,7 @@ M.meta = {
 ---@class snacks.image.Env
 ---@field name string
 ---@field env table<string, string|true>
+---@field terminal? string
 ---@field supported? boolean default: false
 ---@field placeholders? boolean default: false
 ---@field setup? fun(): boolean?
@@ -64,6 +65,7 @@ local defaults = {
     "mkv",
     "webm",
     "pdf",
+    "icns",
   },
   force = false, -- try displaying the image, even if the terminal does not support it
   doc = {
@@ -127,9 +129,9 @@ local defaults = {
     ---@type table<string,snacks.image.args>
     magick = {
       default = { "{src}[0]", "-scale", "1920x1080>" }, -- default for raster images
-      vector = { "-density", 192, "{src}[0]" }, -- used by vector images like svg
-      math = { "-density", 192, "{src}[0]", "-trim" },
-      pdf = { "-density", 192, "{src}[0]", "-background", "white", "-alpha", "remove", "-trim" },
+      vector = { "-density", 192, "{src}[{page}]" }, -- used by vector images like svg
+      math = { "-density", 192, "{src}[{page}]", "-trim" },
+      pdf = { "-density", 192, "{src}[{page}]", "-background", "white", "-alpha", "remove", "-trim" },
     },
   },
   math = {
@@ -167,7 +169,7 @@ M.config = Snacks.config.get("image", defaults)
 
 Snacks.config.style("snacks_image", {
   relative = "cursor",
-  border = "rounded",
+  border = true,
   focusable = false,
   backdrop = false,
   row = 1,
@@ -229,7 +231,6 @@ function M.langs()
     return q:match("queries/(.-)/images%.scm")
   end, queries)
 end
-
 ---@private
 ---@param ev? vim.api.keyset.create_autocmd.callback_args
 function M.setup(ev)
@@ -237,6 +238,7 @@ function M.setup(ev)
     return
   end
   did_setup = true
+
   local group = vim.api.nvim_create_augroup("snacks.image", { clear = true })
 
   vim.api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
@@ -298,6 +300,13 @@ end
 
 ---@private
 function M.health()
+  local detected = false
+  require("snacks.image.terminal").detect(function()
+    detected = true
+  end)
+  vim.wait(1500, function()
+    return detected
+  end, 10)
   Snacks.health.have_tool({ "kitty", "wezterm", "ghostty" })
   local is_win = jit.os:find("Windows")
   if not Snacks.health.have_tool({ "magick", not is_win and "convert" or nil }) then

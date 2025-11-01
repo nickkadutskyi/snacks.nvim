@@ -90,6 +90,7 @@ In case of issues, make sure to run `:checkhealth snacks`.
     "mkv",
     "webm",
     "pdf",
+    "icns",
   },
   force = false, -- try displaying the image, even if the terminal does not support it
   doc = {
@@ -153,9 +154,9 @@ In case of issues, make sure to run `:checkhealth snacks`.
     ---@type table<string,snacks.image.args>
     magick = {
       default = { "{src}[0]", "-scale", "1920x1080>" }, -- default for raster images
-      vector = { "-density", 192, "{src}[0]" }, -- used by vector images like svg
-      math = { "-density", 192, "{src}[0]", "-trim" },
-      pdf = { "-density", 192, "{src}[0]", "-background", "white", "-alpha", "remove", "-trim" },
+      vector = { "-density", 192, "{src}[{page}]" }, -- used by vector images like svg
+      math = { "-density", 192, "{src}[{page}]", "-trim" },
+      pdf = { "-density", 192, "{src}[{page}]", "-background", "white", "-alpha", "remove", "-trim" },
     },
   },
   math = {
@@ -201,7 +202,7 @@ docs for more information on how to customize these styles
 ```lua
 {
   relative = "cursor",
-  border = "rounded",
+  border = true,
   focusable = false,
   backdrop = false,
   row = 1,
@@ -223,6 +224,7 @@ docs for more information on how to customize these styles
 ---@class snacks.image.Env
 ---@field name string
 ---@field env table<string, string|true>
+---@field terminal? string
 ---@field supported? boolean default: false
 ---@field placeholders? boolean default: false
 ---@field setup? fun(): boolean?

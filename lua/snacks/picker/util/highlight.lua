@@ -2,11 +2,27 @@
 local M = {}
 
 M.langs = {} ---@type table<string, boolean>
+M._scratch = {} ---@type table<string, number>
+
+---@param source string
+---@param lang string
+function M.scratch_buf(source, lang)
+  local buf = M._scratch[lang]
+  if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+    buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, "snacks://picker/highlight/" .. lang)
+    M._scratch[lang] = buf
+  end
+  vim.bo[buf].fixeol = false
+  vim.bo[buf].eol = false
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(source, "\n", { plain = true }))
+  return buf
+end
 
 ---@param opts? {buf?:number, code?:string, ft?:string, lang?:string, file?:string, extmarks?:boolean}
 function M.get_highlights(opts)
   opts = opts or {}
-  local source = assert(opts.buf or opts.code, "buf or code is required")
+  assert(opts.buf or opts.code, "buf or code is required")
   assert(not (opts.buf and opts.code), "only one of buf or code is allowed")
 
   local ret = {} ---@type table<number, snacks.picker.Extmark[]>
@@ -16,19 +32,17 @@ function M.get_highlights(opts)
     or (opts.file and vim.filetype.match({ filename = opts.file, buf = 0 }))
     or vim.bo.filetype
   local lang = Snacks.util.get_lang(opts.lang or ft)
-  local parser ---@type vim.treesitter.LanguageTree?
+  lang = lang and lang:lower() or nil
+  local parser, buf ---@type vim.treesitter.LanguageTree?, number?
+
   if lang then
-    lang = lang:lower()
     local ok = false
-    if opts.buf then
-      ok, parser = pcall(vim.treesitter.get_parser, opts.buf, lang)
-    else
-      ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
-    end
+    buf = opts.buf or M.scratch_buf(opts.code, lang)
+    ok, parser = pcall(vim.treesitter.get_parser, buf, lang)
     parser = ok and parser or nil
   end
 
-  if parser then
+  if parser and buf then
     parser:parse(true)
     parser:for_each_tree(function(tstree, tree)
       if not tstree then
@@ -40,14 +54,14 @@ function M.get_highlights(opts)
         return
       end
 
-      for capture, node, metadata in query:iter_captures(tstree:root(), source) do
+      for capture, node, metadata in query:iter_captures(tstree:root(), buf) do
         ---@type string
         local name = query.captures[capture]
         if name ~= "spell" then
           local range = { node:range() } ---@type number[]
           local multi = range[1] ~= range[3]
           local text = multi
-              and vim.split(vim.treesitter.get_node_text(node, source, metadata[capture]), "\n", { plain = true })
+              and vim.split(vim.treesitter.get_node_text(node, buf, metadata[capture]), "\n", { plain = true })
             or {}
           for row = range[1] + 1, range[3] + 1 do
             local first, last = row == range[1] + 1, row == range[3] + 1
@@ -109,6 +123,21 @@ function M.offset(line, opts)
     end
   end
   return offset
+end
+
+---@param line snacks.picker.Highlight[]
+---@param positions number[]
+---@param offset? number
+function M.matches(line, positions, offset)
+  offset = offset or 0
+  for _, pos in ipairs(positions) do
+    table.insert(line, {
+      col = pos - 1 + offset,
+      end_col = pos + offset,
+      hl_group = "SnacksPickerMatch",
+    })
+  end
+  return line
 end
 
 ---@param line snacks.picker.Highlight[]
@@ -202,6 +231,42 @@ function M.winhl(prefix, links)
   return table.concat(ret, ",")
 end
 
+--- Resolves the first flex text in the line.
+---@param line snacks.picker.Highlight[]
+---@param max_width number
+function M.resolve(line, max_width)
+  local ret = {} ---@type snacks.picker.Highlight[]
+  local offset = 0
+  local width = 0
+  local resolve ---@type number?
+
+  for t, text in ipairs(line) do
+    local w = M.offset({ text }, { char_idx = true })
+    if not resolve and type(text) == "table" and text.resolve then
+      ---@cast text snacks.picker.Text
+      resolve = t
+    elseif resolve then
+      width = width + w
+    else
+      width = width + w
+      offset = offset + w
+    end
+  end
+
+  if resolve then
+    vim.list_extend(ret, line, 1, resolve - 1)
+    offset = M.offset(ret)
+    vim.list_extend(ret, line[resolve].resolve(max_width - width))
+    local diff = M.offset(ret) - offset
+    vim.list_extend(ret, line, resolve + 1)
+    M.fix_offset(ret, diff, resolve + 1)
+  else
+    return line
+  end
+
+  return ret
+end
+
 ---@param line snacks.picker.Highlight[]
 ---@param opts? {offset?:number}
 function M.to_text(line, opts)
@@ -248,15 +313,26 @@ function M.to_text(line, opts)
 end
 
 ---@param hl snacks.picker.Highlight[]
-function M.fix_offset(hl, offset)
-  for _, t in ipairs(hl) do
-    if t.col then
-      t.col = t.col + offset
-    end
-    if t.end_col then
-      t.end_col = t.end_col + offset
+---@param start_idx? number
+function M.fix_offset(hl, offset, start_idx)
+  for i, t in ipairs(hl) do
+    if start_idx == nil or i >= start_idx then
+      if t.col then
+        t.col = t.col + offset
+      end
+      if t.end_col then
+        t.end_col = t.end_col + offset
+      end
     end
   end
+end
+
+---@param dst snacks.picker.Highlight[]
+---@param src snacks.picker.Highlight[]
+function M.extend(dst, src)
+  local offset = M.offset(dst)
+  M.fix_offset(src, offset)
+  return vim.list_extend(dst, src)
 end
 
 ---@param buf number
@@ -268,7 +344,10 @@ function M.set(buf, ns, row, hl)
     table.remove(hl)
   end
   local line_text, extmarks = Snacks.picker.highlight.to_text(hl)
+  local modifiable = vim.bo[buf].modifiable
+  vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, row - 1, row, false, { line_text })
+  vim.bo[buf].modifiable = modifiable
   for _, extmark in ipairs(extmarks) do
     local col = extmark.col
     extmark.col = nil
@@ -286,5 +365,82 @@ function M.set(buf, ns, row, hl)
     end
   end
 end
+
+---@alias snacks.picker.badge.color string|{ fg:string, bg:string }
+local badge_cache = {} ---@type table<string, {hl:string, color:snacks.picker.badge.color}>
+
+---@param color snacks.picker.badge.color
+local function badge_hl(color)
+  local key = type(color) == "string" and color or ("%s:%s"):format(color.fg or "", color.bg or "")
+  if badge_cache[key] then
+    return badge_cache[key].hl
+  end
+
+  local fg, bg ---@type string, string
+  if type(color) == "string" then
+    if color:sub(1, 1) == "#" then
+      bg = color
+    else
+      fg, bg = Snacks.util.color(color, "fg"), Snacks.util.color(color, "bg")
+    end
+  else
+    fg, bg = color.fg, color.bg
+  end
+
+  if not fg and not bg then -- default to inverse of Normal
+    fg = Snacks.util.color("Normal", "bg") or "#ffffff"
+    bg = Snacks.util.color("Normal", "fg") or "#000000"
+  elseif fg and not bg then -- set bg to a blended version of fg and Normal bg
+    bg = bg or Snacks.util.color("Normal", "bg") or "#000000"
+    bg = Snacks.util.blend(fg, bg, 0.1)
+  elseif bg and not fg then -- calculate fg based on bg brightness
+    local light, dark = "#ffffff", "#000000"
+    do
+      local normal_fg = Snacks.util.color("Normal", "fg")
+      local normal_bg = Snacks.util.color("Normal", "bg")
+      if vim.o.background == "light" then
+        normal_fg, normal_bg = normal_bg, normal_fg
+      end
+      light = normal_fg or light
+      dark = normal_bg or dark
+    end
+    local r, g, b = bg:match("#?(%x%x)(%x%x)(%x%x)")
+    r, g, b = tonumber(r, 16), tonumber(g, 16), tonumber(b, 16)
+    local yiq = (r * 299 + g * 587 + b * 114) / 1000
+    fg = yiq >= 128 and dark or light
+  end
+
+  local hl_group = ("SnacksBadge_%s_%s"):format(fg:sub(2), bg:sub(2))
+  vim.api.nvim_set_hl(0, hl_group, { fg = fg, bg = bg })
+  vim.api.nvim_set_hl(0, hl_group .. "Inv", { fg = bg })
+  badge_cache[key] = { hl = hl_group, color = color }
+  return hl_group
+end
+
+--- Renders a badge
+---@param text string
+---@param color snacks.picker.badge.color
+function M.badge(text, color)
+  local left_sep, right_sep = "", ""
+
+  local hl_group = badge_hl(color)
+  ---@type snacks.picker.Highlight[]
+  return {
+    { left_sep, hl_group .. "Inv", virtual = true },
+    { text, hl_group },
+    { right_sep, hl_group .. "Inv", virtual = true },
+  }
+end
+
+vim.api.nvim_create_autocmd("ColorScheme", {
+  group = vim.api.nvim_create_augroup("snacks.picker.highlight,badges", { clear = true }),
+  callback = function(ev)
+    local badges = badge_cache
+    badge_cache = {}
+    for _, v in pairs(badges) do
+      badge_hl(v.color)
+    end
+  end,
+})
 
 return M

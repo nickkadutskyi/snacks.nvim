@@ -40,7 +40,9 @@ function M.fix_keys(opts)
   return opts
 end
 
----@param opts? snacks.picker.Config
+---@generic T:snacks.picker.Config
+---@param opts? T
+---@return T
 function M.get(opts)
   M.setup()
   opts = M.fix_keys(opts)
@@ -80,7 +82,7 @@ function M.get(opts)
   if opts.cwd == true or opts.cwd == "" then
     opts.cwd = nil
   elseif opts.cwd then
-    opts.cwd = svim.fs.normalize(vim.fn.fnamemodify(opts.cwd, ":p"))
+    opts.cwd = svim.fs.normalize(vim.fn.fnamemodify(opts.cwd:gsub("[\\/]?$", "/"), ":p"))
   end
   for _, t in ipairs(todo) do
     if t.config then
@@ -144,10 +146,10 @@ function M.multi(opts)
     end
     local finder = M.finder(source.finder)
     finders[#finders + 1] = function(fopts, ctx)
-      fopts = Snacks.config.merge({}, vim.deepcopy(source), fopts)
+      fopts = Snacks.config.merge(vim.deepcopy(source), fopts)
+      ctx = ctx:clone(fopts)
       -- Update source filter when needed
       if not vim.tbl_isempty(fopts.filter or {}) then
-        ctx = setmetatable({}, { __index = ctx })
         ctx.filter = ctx.filter:clone():init(fopts)
       end
       return finder(fopts, ctx)
@@ -262,6 +264,10 @@ function M.layout(opts)
     end
   end
 
+  if layout.config then
+    layout = layout.config(layout) or layout
+  end
+
   return layout
 end
 
@@ -294,6 +300,19 @@ function M.finder(finder)
   end
   ---@cast finder string
   return M.field(finder) or nop
+end
+
+---@param picker snacks.Picker
+---@param action string
+function M.action(picker, action)
+  local ret = (picker.opts.actions or {})[action] or require("snacks.picker.actions")[action]
+  if ret then
+    return ret
+  end
+  local source = action:match("^(.-)_")
+  if source then -- source specific action
+    return (M.field(("%s_actions"):format(source)) or {})[action]
+  end
 end
 
 --- Resolves a module field

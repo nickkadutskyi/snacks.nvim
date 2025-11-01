@@ -44,6 +44,8 @@ Snacks.util.set_hl({
   KeymapNowait = "@variable.builtin",
   BufNr = "Number",
   BufFlags = "NonText",
+  BufType = "Function",
+  FileType = "DiagnosticHint",
   KeymapRhs = "NonText",
   Time = "Special",
   UndoAdded = "Added",
@@ -57,6 +59,7 @@ Snacks.util.set_hl({
   GitBranchCurrent = "Number",
   GitDate = "Special",
   GitIssue = "Number",
+  GitAuthor = "Constant",
   GitType = "Title", -- conventional commit type
   GitScope = "Italic", -- conventional commit scope
   GitStatus = "Special",
