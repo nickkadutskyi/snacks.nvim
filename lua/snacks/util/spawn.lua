@@ -20,7 +20,7 @@ local uv = vim.uv or vim.loop
 ---@field cmd? nil
 ---@field on_exit? fun(procs: snacks.spawn.Proc[], err: boolean)
 
----@class snacks.spawn.Proc
+---@class snacks.spawn.Proc: snacks.picker.Waitable
 ---@field opts snacks.spawn.Config
 ---@field handle? uv.uv_process_t
 ---@field stdout uv.uv_pipe_t
@@ -105,21 +105,7 @@ function Proc:debug(opts)
   return Snacks.debug.cmd(opts)
 end
 
----@async
-function Proc:wait()
-  assert(self.async, "Not in an async context")
-  assert(self.async == Async.running(), "Not in the current async context")
-  while not self.did_exit or self:running() do
-    self.async:suspend()
-  end
-end
-
-function Proc:run()
-  assert(not self.handle, "already running")
-  if self.aborted then
-    return self:on_exit()
-  end
-
+function Proc:setup_async()
   self.async = Async.running()
   if self.async then
     self.async:on("abort", function()
@@ -128,6 +114,26 @@ function Proc:run()
       end
     end)
   end
+end
+
+---@async
+function Proc:wait()
+  self:setup_async()
+  assert(self.async, "Not in an async context")
+  assert(self.async == Async.running(), "Not in the current async context")
+  while not self.did_exit or self:running() do
+    self.async:suspend()
+  end
+  return self
+end
+
+function Proc:run()
+  assert(not self.handle, "already running")
+  if self.aborted then
+    return self:on_exit()
+  end
+
+  self:setup_async()
 
   self.stdout = assert(uv.new_pipe())
   self.stderr = assert(uv.new_pipe())
@@ -223,10 +229,10 @@ function Proc:on_exit()
     close(self.stderr)
     if self.opts.on_exit then
       self.opts.on_exit(self, self.code ~= 0 or self.signal ~= 0 or self.aborted or false)
-      self.did_exit = true
-      if self.async then
-        self.async:resume()
-      end
+    end
+    self.did_exit = true
+    if self.async then
+      self.async:resume()
     end
   end)
 end
@@ -279,5 +285,18 @@ function M.multi(procs, opts)
 end
 
 M.new = Proc.new
+
+---@param cmd string[]
+---@async
+function M.exec(cmd)
+  return vim.trim(M.new({
+    cmd = cmd[1],
+    args = vim.list_slice(cmd, 2),
+    stdout_buffered = true,
+    stderr_buffered = true,
+  })
+    :wait()
+    :out())
+end
 
 return M

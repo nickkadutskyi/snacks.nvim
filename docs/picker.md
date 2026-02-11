@@ -178,11 +178,20 @@ Snacks.picker.pick({source = "files", ...})
   ---@class snacks.picker.previewers.Config
   previewers = {
     diff = {
-      builtin = true, -- use Neovim for previewing diffs (true) or use an external tool (false)
-      cmd = { "delta" }, -- example to show a diff with delta
+      -- fancy: Snacks fancy diff (borders, multi-column line numbers, syntax highlighting)
+      -- syntax: Neovim's built-in diff syntax highlighting
+      -- terminal: external command (git's pager for git commands, `cmd` for other diffs)
+      style = "fancy", ---@type "fancy"|"syntax"|"terminal"
+      cmd = { "delta" }, -- example for using `delta` as the external diff command
+      ---@type vim.wo?|{} window options for the fancy diff preview window
+      wo = {
+        breakindent = true,
+        wrap = true,
+        linebreak = true,
+        showbreak = "",
+      },
     },
     git = {
-      builtin = true, -- use Neovim for previewing git output (true) or use git (false)
       args = {}, -- additional arguments passed to the git command. Useful to set pager options usin `-c ...`
     },
     file = {
@@ -648,8 +657,9 @@ Snacks.picker.pick({source = "files", ...})
 ```lua
 ---@alias snacks.picker.format.resolve fun(max_width:number):snacks.picker.Highlight[]
 ---@alias snacks.picker.Extmark vim.api.keyset.set_extmark|{col:number, row?:number, field?:string}
----@alias snacks.picker.Text {[1]:string, [2]:string?, virtual?:boolean, field?:string, resolve?:snacks.picker.format.resolve}
----@alias snacks.picker.Highlight snacks.picker.Text|snacks.picker.Extmark
+---@alias snacks.picker.Meta {[string]:any}
+---@alias snacks.picker.Text {[1]:string, [2]:(string|string[])?, virtual?:boolean, field?:string, resolve?:snacks.picker.format.resolve, inline?:boolean}
+---@alias snacks.picker.Highlight snacks.picker.Text|snacks.picker.Extmark|{meta?:snacks.picker.Meta}
 ---@alias snacks.picker.format fun(item:snacks.picker.Item, picker:snacks.Picker):snacks.picker.Highlight[]
 ---@alias snacks.picker.preview fun(ctx: snacks.picker.preview.ctx):boolean?
 ---@alias snacks.picker.sort fun(a:snacks.picker.Item, b:snacks.picker.Item):boolean
@@ -1089,6 +1099,28 @@ Neovim commands
 }
 ```
 
+### `gh_actions`
+
+```vim
+:lua Snacks.picker.gh_actions(opts?)
+```
+
+```lua
+---@class snacks.picker.gh.actions.Config: snacks.picker.Config
+---@field number number issue or PR number
+---@field repo string GitHub repository (owner/repo). Defaults to current git repo
+---@field type "issue" | "pr"
+---@field item? snacks.picker.gh.Item
+{
+  layout = { preset = "select", layout = { max_width = 50 } },
+  title = "  Actions",
+  main = { current = true },
+  finder = "gh_get_actions",
+  format = "gh_format_action",
+  confirm = "gh_perform_action",
+}
+```
+
 ### `gh_diff`
 
 ```vim
@@ -1104,8 +1136,16 @@ Neovim commands
   title = "  Pull Request Diff",
   group = true,
   finder = "gh_diff",
-  format = "file",
-  preview = "diff",
+  format = "git_status",
+  preview = "gh_preview_diff",
+  win = {
+    preview = {
+      keys = {
+        ["a"] = { "gh_comment", mode = { "n", "x" } },
+        ["<cr>"] = { "gh_actions", mode = { "n", "x" } },
+      },
+    },
+  },
 }
 ```
 
@@ -1274,11 +1314,12 @@ Neovim commands
   format = "git_status",
   preview = "diff",
   matcher = { sort_empty = true },
+  sort = { fields = { "score:desc", "file", "idx" } },
   win = {
     input = {
       keys = {
         ["<Tab>"] = { "git_stage", mode = { "n", "i" } },
-        ["<c-r>"] = { "git_restore", mode = { "n", "i" } },
+        ["<c-r>"] = { "git_restore", mode = { "n", "i" }, nowait = true },
       },
     },
   },
@@ -1427,7 +1468,7 @@ Git log
     input = {
       keys = {
         ["<Tab>"] = { "git_stage", mode = { "n", "i" } },
-        ["<c-r>"] = { "git_restore", mode = { "n", "i" } },
+        ["<c-r>"] = { "git_restore", mode = { "n", "i" }, nowait = true },
       },
     },
   },
@@ -1494,6 +1535,7 @@ Git log
 {
   finder = "grep",
   regex = false,
+  args = { "--word-regexp" },
   format = "file",
   search = function(picker)
     return picker:word()
@@ -1548,9 +1590,14 @@ Neovim help tags
 
 ```lua
 ---@class snacks.picker.icons.Config: snacks.picker.Config
----@field icon_sources? string[]
+---@field icon_sources? string[] list of sources to use
+--- Custom icon sources can be added here. The key is the source name,
+--- and the value is the file path or URL to load icons from.
+--- The file should be a JSON array of:
+--- `{[1]:string, [2]:string}|{icon:string, name:string, category:string}`
+--- The format is compatible with https://github.com/nvim-telescope/telescope-symbols.nvim
+---@field custom_sources? table<string,string> additional icon sources `table<source,file|url>`
 {
-  icon_sources = { "nerd_fonts", "emoji" },
   main = { current = true },
   finder = "icons",
   format = "icon",
@@ -1963,6 +2010,13 @@ vim.tbl_extend("force", {}, M.lsp_symbols, {
   format = "file",
   global = true,
   ["local"] = true,
+  win = {
+    input = {
+      keys = {
+        ["<c-x>"] = { "mark_delete", mode = { "n", "i" } },
+      },
+    },
+  },
 }
 ```
 
@@ -2101,7 +2155,7 @@ Open recent projects
         ["<c-e>"] = { { "tcd", "picker_explorer" }, mode = { "n", "i" } },
         ["<c-f>"] = { { "tcd", "picker_files" }, mode = { "n", "i" } },
         ["<c-g>"] = { { "tcd", "picker_grep" }, mode = { "n", "i" } },
-        ["<c-r>"] = { { "tcd", "picker_recent" }, mode = { "n", "i" } },
+        ["<c-r>"] = { { "tcd", "picker_recent" }, mode = { "n", "i" }, nowait = true },
         ["<c-w>"] = { { "tcd" }, mode = { "n", "i" } },
         ["<c-t>"] = {
           function(picker)
@@ -2349,7 +2403,7 @@ Search tags file
 
 ```lua
 ---@class snacks.picker.undo.Config: snacks.picker.Config
----@field diff? vim.diff.Opts
+---@field diff? vim.text.diff.Opts
 {
   finder = "vim_undo",
   format = "undo",
@@ -2523,7 +2577,7 @@ M.sidebar
     min_width = 80,
     max_width = 100,
     height = 0.4,
-    min_height = 3,
+    min_height = 2,
     box = "vertical",
     border = true,
     title = "{title}",
@@ -2856,6 +2910,12 @@ Send selected or all items to the location list.
 
 ```lua
 Snacks.picker.actions.loclist(picker)
+```
+
+### `Snacks.picker.actions.mark_delete()`
+
+```lua
+Snacks.picker.actions.mark_delete(picker)
 ```
 
 ### `Snacks.picker.actions.paste()`

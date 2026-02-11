@@ -2,8 +2,9 @@ local M = {}
 
 ---@alias snacks.picker.format.resolve fun(max_width:number):snacks.picker.Highlight[]
 ---@alias snacks.picker.Extmark vim.api.keyset.set_extmark|{col:number, row?:number, field?:string}
----@alias snacks.picker.Text {[1]:string, [2]:string?, virtual?:boolean, field?:string, resolve?:snacks.picker.format.resolve}
----@alias snacks.picker.Highlight snacks.picker.Text|snacks.picker.Extmark
+---@alias snacks.picker.Meta {[string]:any}
+---@alias snacks.picker.Text {[1]:string, [2]:(string|string[])?, virtual?:boolean, field?:string, resolve?:snacks.picker.format.resolve, inline?:boolean}
+---@alias snacks.picker.Highlight snacks.picker.Text|snacks.picker.Extmark|{meta?:snacks.picker.Meta}
 ---@alias snacks.picker.format fun(item:snacks.picker.Item, picker:snacks.Picker):snacks.picker.Highlight[]
 ---@alias snacks.picker.preview fun(ctx: snacks.picker.preview.ctx):boolean?
 ---@alias snacks.picker.sort fun(a:snacks.picker.Item, b:snacks.picker.Item):boolean
@@ -179,11 +180,20 @@ local defaults = {
   ---@class snacks.picker.previewers.Config
   previewers = {
     diff = {
-      builtin = true, -- use Neovim for previewing diffs (true) or use an external tool (false)
-      cmd = { "delta" }, -- example to show a diff with delta
+      -- fancy: Snacks fancy diff (borders, multi-column line numbers, syntax highlighting)
+      -- syntax: Neovim's built-in diff syntax highlighting
+      -- terminal: external command (git's pager for git commands, `cmd` for other diffs)
+      style = "fancy", ---@type "fancy"|"syntax"|"terminal"
+      cmd = { "delta" }, -- example for using `delta` as the external diff command
+      ---@type vim.wo?|{} window options for the fancy diff preview window
+      wo = {
+        breakindent = true,
+        wrap = true,
+        linebreak = true,
+        showbreak = "",
+      },
     },
     git = {
-      builtin = true, -- use Neovim for previewing git output (true) or use git (false)
       args = {}, -- additional arguments passed to the git command. Useful to set pager options usin `-c ...`
     },
     file = {

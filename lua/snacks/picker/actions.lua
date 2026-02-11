@@ -26,6 +26,12 @@ local edit_cmd = {
   tabdrop = "tab drop",
 }
 
+--- Get `vim.v.count1`, but return 1 if in insert mode.
+--- In insert mode, you can't really pass a count, so we default to 1
+local function count1()
+  return vim.fn.mode():sub(1, 1) == "i" and 1 or vim.v.count1
+end
+
 function M.jump(picker, _, action)
   ---@cast action snacks.picker.jump.Action
   -- if we're still in insert mode, stop it and schedule
@@ -59,6 +65,9 @@ function M.jump(picker, _, action)
     and vim.api.nvim_buf_line_count(current_buf) == 1
     and vim.api.nvim_buf_get_lines(current_buf, 0, -1, false)[1] == ""
     and vim.api.nvim_buf_get_name(current_buf) == ""
+  local current_tab_windows = #vim.tbl_filter(function(w)
+    return not Snacks.util.is_float(w)
+  end, vim.api.nvim_tabpage_list_wins(current_tab))
 
   if not current_empty then
     -- save position in jump list
@@ -119,6 +128,11 @@ function M.jump(picker, _, action)
     end
   elseif cmd == "buffer" and #items == 1 and picker.opts.jump.reuse_win then
     find_win(true)
+  end
+
+  -- Don't open a new tab if current buffer is empty
+  if cmd == "tab sbuffer" and current_empty and current_tab_windows == 1 then
+    cmd = "buffer"
   end
 
   -- open the first buffer
@@ -337,16 +351,40 @@ function M.bufdelete(picker)
   picker:refresh()
 end
 
+function M.mark_delete(picker)
+  local selected = picker:selected({ fallback = true })
+  for _, item in ipairs(selected) do
+    if item.label then
+      if item.buf then
+        vim.api.nvim_buf_del_mark(item.buf, item.label)
+      else
+        vim.api.nvim_del_mark(item.label)
+      end
+    end
+  end
+  picker:refresh()
+end
+
 function M.git_stage(picker)
   local items = picker:selected({ fallback = true })
+  local first = items[1]
+  if not first or not (first.status or (first.diff and first.staged ~= nil)) then
+    Snacks.notify.error("Can't stage/unstage this change", { title = "Snacks Picker" })
+    return
+  end
+
   local done = 0
   for _, item in ipairs(items) do
     local opts = { cwd = item.cwd } ---@type snacks.picker.util.cmd.Opts
-
-    local cmd = item.status:sub(2) == " " and { "git", "restore", "--staged", item.file } or { "git", "add", item.file }
-    if item.diff then
+    local cmd ---@type string[]
+    if item.diff and item.staged ~= nil then
       opts.input = item.diff
       cmd = { "git", "apply", "--cached", item.staged and "--reverse" or nil }
+    elseif item.status then
+      cmd = item.status:sub(2) == " " and { "git", "restore", "--staged", item.file } or { "git", "add", item.file }
+    else
+      Snacks.notify.error("Can't stage/unstage this change", { title = "Snacks Picker" })
+      return
     end
     Snacks.picker.util.cmd(cmd, function()
       done = done + 1
@@ -363,6 +401,12 @@ function M.git_restore(picker)
     return
   end
 
+  local first = items[1]
+  if not first or not (first.status or (first.diff and first.staged ~= nil)) then
+    Snacks.notify.warn("Can't restore this change", { title = "Snacks Picker" })
+    return
+  end
+
   -- Confirm before discarding changes
   ---@param item snacks.picker.Item
   local files = vim.tbl_map(function(item)
@@ -374,16 +418,21 @@ function M.git_restore(picker)
   Snacks.picker.util.confirm(msg, function()
     local done = 0
     for _, item in ipairs(items) do
-      local cmd = { "git", "restore", item.file }
+      local cmd ---@type string[]
       local opts = { cwd = item.cwd }
 
-      if item.diff then
+      if item.diff and item.staged ~= nil then
         opts.input = item.diff
         if item.staged then
           cmd = { "git", "apply", "--reverse", "--cached" }
         else
           cmd = { "git", "apply", "--reverse" }
         end
+      elseif item.status then
+        cmd = { "git", "restore", item.file }
+      else
+        Snacks.notify.error("Can't restore this change", { title = "Snacks Picker" })
+        return
       end
 
       Snacks.picker.util.cmd(cmd, function()
@@ -550,6 +599,11 @@ function M.paste(picker, item, action)
   if item then
     local value = item[action.field] or item.data or item.text
     vim.api.nvim_paste(value, true, -1)
+    if picker.input.mode == "i" then
+      vim.schedule(function()
+        vim.cmd.startinsert({ bang = true })
+      end)
+    end
   end
 end
 M.put = M.paste
@@ -566,14 +620,14 @@ end
 --- and moves the cursor to the next item.
 function M.select_and_next(picker)
   picker.list:select()
-  picker.list:_move(vim.v.count1)
+  picker.list:_move(count1())
 end
 
 --- Toggles the selection of the current item,
 --- and moves the cursor to the prev item.
 function M.select_and_prev(picker)
   picker.list:select()
-  picker.list:_move(-vim.v.count1)
+  picker.list:_move(-count1())
 end
 
 --- Selects all items in the list.
@@ -708,6 +762,10 @@ end
 
 function M.cycle_win(picker)
   local wins = { picker.input.win.win, picker.preview.win.win, picker.list.win.win }
+  -- HACK: allow specifying an additional window to cycle through
+  if type(vim.g.snacks_picker_cycle_win) == "number" then
+    table.insert(wins, 3, vim.g.snacks_picker_cycle_win)
+  end
   wins = vim.tbl_filter(function(w)
     return vim.api.nvim_win_is_valid(w)
   end, wins)
@@ -753,11 +811,11 @@ function M.list_bottom(picker)
 end
 
 function M.list_down(picker)
-  picker.list:move(vim.v.count1)
+  picker.list:move(count1())
 end
 
 function M.list_up(picker)
-  picker.list:move(-vim.v.count1)
+  picker.list:move(-count1())
 end
 
 function M.list_scroll_top(picker)

@@ -1,5 +1,5 @@
+local Actions = require("snacks.gh.actions")
 local Api = require("snacks.gh.api")
-local Actions = require("snacks.gh.actions").actions
 
 local M = {}
 
@@ -8,17 +8,22 @@ M.actions = setmetatable({}, {
     if type(k) ~= "string" then
       return
     end
-    if not Actions[k] then
+    if not Actions.actions[k] then
       return nil
     end
     ---@type snacks.picker.Action
     local action = {
-      desc = Actions[k].desc,
+      desc = Actions.actions[k].desc,
       action = function(picker, item, action)
+        local items = picker:selected({ fallback = true })
+        if item.gh_item then
+          item = item.gh_item
+          items = { item }
+        end
         ---@diagnostic disable-next-line: param-type-mismatch
-        return Actions[k].action(item, {
+        return Actions.actions[k].action(item, {
           picker = picker,
-          items = picker:selected({ fallback = true }),
+          items = items,
           action = action,
         })
       end,
@@ -44,7 +49,7 @@ function M.gh(opts, ctx)
   end
 end
 
----@param opts snacks.picker.Config
+---@param opts snacks.picker.gh.issue.Config
 ---@type snacks.picker.finder
 function M.issue(opts, ctx)
   return M.gh(
@@ -55,7 +60,7 @@ function M.issue(opts, ctx)
   )
 end
 
----@param opts snacks.picker.Config
+---@param opts snacks.picker.gh.pr.Config
 ---@type snacks.picker.finder
 function M.pr(opts, ctx)
   return M.gh(
@@ -64,6 +69,73 @@ function M.pr(opts, ctx)
     }, opts),
     ctx
   )
+end
+
+---@param opts snacks.picker.gh.actions.Config
+---@type snacks.picker.finder
+function M.get_actions(opts, ctx)
+  opts = opts or {}
+  ---@async
+  return function(cb)
+    local item = opts.item
+    if not opts.item and not opts.number then
+      item = Api.current_pr()
+    end
+
+    if not item then
+      local required = { "type", "repo", "number" }
+      local missing = vim.tbl_filter(function(field)
+        return opts[field] == nil
+      end, required) ---@type string[]
+      if #missing > 0 then
+        Snacks.notify.error({
+          "Missing required options for `Snacks.picker.gh_actions()`:",
+          "- `" .. table.concat(missing, ", ") .. "`",
+          "",
+          "Either provide the fields, or run in a git repo with a **current PR**.",
+        }, { title = "Snacks Picker GH Actions" })
+        return
+      end
+      item = Api.get({ type = opts.type or "pr", repo = opts.repo, number = opts.number })
+      if not item then
+        Snacks.notify.error("snacks.picker.gh.get_actions: Failed to get item")
+        return
+      end
+    end
+
+    local actions = ctx.async:schedule(function()
+      return Actions.get_actions(item, {
+        picker = ctx.picker,
+        items = { item },
+      })
+    end)
+    actions.gh_actions = nil -- remove this action
+    actions.gh_perform_action = nil -- remove this action
+    local items = {} ---@type snacks.picker.finder.Item[]
+    for name, action in pairs(actions) do
+      ---@class snacks.picker.gh.Action: snacks.picker.finder.Item
+      items[#items + 1] = {
+        text = Snacks.picker.util.text(action, { "name", "desc" }),
+        file = item.uri,
+        name = name,
+        item = item,
+        desc = action.desc or name,
+        action = action,
+      }
+    end
+    table.sort(items, function(a, b)
+      local pa = a.action.priority or 0
+      local pb = b.action.priority or 0
+      if pa ~= pb then
+        return pa > pb
+      end
+      return a.desc < b.desc
+    end)
+    for i, it in ipairs(items) do
+      it.text = ("%d. %s"):format(i, it.text)
+      cb(it)
+    end
+  end
 end
 
 ---@param opts snacks.picker.gh.diff.Config
@@ -79,14 +151,33 @@ function M.diff(opts, ctx)
   if opts.repo then
     vim.list_extend(args, { "--repo", opts.repo })
   end
-  return require("snacks.picker.source.diff").diff(
-    ctx:opts({
-      cmd = "gh",
-      args = args,
-      cwd = cwd,
-    }),
-    ctx
-  )
+
+  opts.previewers.diff.style = "fancy" -- only fancy style support inline review comments
+
+  local Render = require("snacks.gh.render")
+  local Diff = require("snacks.picker.source.diff")
+  ---@async
+  return function(cb)
+    local item = Api.get({ type = "pr", repo = opts.repo, number = opts.pr })
+
+    -- fetch on the main thread since rendering uses non-fast APIs
+    local annotations = ctx.async:schedule(function()
+      return Render.annotations(item)
+    end)
+
+    Diff.diff(
+      ctx:opts({
+        cmd = "gh",
+        args = args,
+        cwd = cwd,
+        annotations = annotations,
+      }),
+      ctx
+    )(function(it)
+      it.gh_item = item
+      cb(it)
+    end)
+  end
 end
 
 ---@param opts snacks.picker.gh.reactions.Config
@@ -151,7 +242,7 @@ function M.labels(opts, ctx)
       fields = { "labels" },
       args = { "repo", "view", opts.repo },
     })
-    local item = Api.get(opts)
+    local item = Api.get_cached(opts)
     assert(item, "Failed to get item for labels")
     local added = {} ---@type table<string, boolean>
     for _, label in ipairs(item.labels or {}) do
@@ -224,6 +315,19 @@ function M.format(item, picker)
   end
 
   return ret
+end
+
+---@param ctx snacks.picker.preview.ctx
+function M.preview_diff(ctx)
+  Snacks.picker.preview.diff(ctx)
+  local item = ctx.item.gh_item ---@type snacks.picker.gh.Item?
+  if item then
+    vim.b[ctx.buf].snacks_gh = {
+      repo = item.repo,
+      type = item.type,
+      number = item.number,
+    }
+  end
 end
 
 ---@param ctx snacks.picker.preview.ctx
